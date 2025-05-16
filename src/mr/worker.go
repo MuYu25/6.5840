@@ -1,12 +1,14 @@
 package mr
 
 import (
+	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"io"
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -120,6 +122,63 @@ func HandleMapTask(reply *MessageReply, mapf func(string, string) []KeyValue) {
 
 }
 
+func generateFileName(r int, NMap int) []string {
+	var fileName []string
+	for TaskID := 0; TaskID < NMap; TaskID++ {
+		fileName = append(fileName, fmt.Sprintf("mr-%d-%d", TaskID, r))
+	}
+	return fileName
+}
+
 func HandleReduceTask(reply *MessageReply, reducef func(string, []string) string) {
 
+	var intermediate []KeyValue
+
+	intermediateFiles := generateFileName(reply.TaskID, reply.NMap)
+
+	for _, fileName := range intermediateFiles {
+		file, err := os.Open(fileName)
+		if err != nil {
+			log.Fatalf("cannot open %v", fileName)
+			return
+		}
+		dec := json.NewDecoder(file)
+		for {
+			kv := KeyValue{}
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
+	}
+	sort.Slice(intermediate, func(i, j int) bool {
+		return intermediate[i].Key < intermediate[j].Key
+	})
+	oname := fmt.Sprintf("mr-out-%v", reply.TaskID)
+	ofile, err := os.Create(oname)
+	if err != nil {
+		log.Fatalf("cannot create %v", oname)
+		return
+	}
+	for i := 0; i < len(intermediate); {
+		j := i
+		var values []string
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			values = append(values, intermediate[j].Value)
+			j++
+		}
+
+		output := reducef(intermediate[i].Key, values)
+
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	ofile.Close()
+	os.Rename(ofile.Name(), oname)
+	args := MessageSend{
+		TaskID:              reply.TaskID,
+		TaskCompletedStatus: ReduceTaskComplete,
+	}
+	call("Coordinator.ReportTask", &args, &reply)
 }
