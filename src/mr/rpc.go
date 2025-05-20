@@ -6,8 +6,10 @@ package mr
 // remember to capitalize all names.
 //
 
-import "os"
-import "strconv"
+import (
+	"os"
+	"strconv"
+)
 
 //
 // example to show how to declare the arguments
@@ -23,7 +25,37 @@ type ExampleReply struct {
 }
 
 // Add your RPC definitions here.
+type TaskType int
 
+const (
+	MapTask TaskType = iota
+	ReduceTask
+	Wait
+	Exit
+)
+
+type CompleteStatus int
+
+const (
+	MapTaksComplete CompleteStatus = iota
+	ReduceTaskComplete
+	MapTaskFailed
+	ReduceTaskFailed
+)
+
+// 由reply 来分配文件名， 就不需要在MessageSend中添加
+type MessageSend struct {
+	TaskID         int
+	CompleteStatus CompleteStatus
+}
+
+type MessageReply struct {
+	TaskID   int
+	TaskType TaskType
+	FilaName string
+	NMap     int
+	NReduce  int
+}
 
 // Cook up a unique-ish UNIX-domain socket name
 // in /var/tmp, for the coordinator.

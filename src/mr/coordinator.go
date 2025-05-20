@@ -1,33 +1,52 @@
 package mr
 
-import "log"
-import "net"
-import "os"
-import "net/rpc"
-import "net/http"
+import (
+	"log"
+	"net"
+	"net/http"
+	"net/rpc"
+	"os"
+	"sync"
+	"time"
+)
 
+type TaskStatus int
+
+const (
+	Assigned TaskStatus = iota
+	Unassigned
+	Completed
+	Fialed
+)
+
+type TaskInfo struct {
+	FileName   string
+	TaskStatus TaskStatus
+	TimeStamp  time.Time
+}
 
 type Coordinator struct {
 	// Your definitions here.
-
+	Mutex              sync.Mutex
+	AllMapCompleted    bool
+	AllReduceCompleted bool
+	MapTasks           []TaskInfo
+	ReduceTasks        []TaskInfo
+	NMap               int
+	NReduce            int
 }
 
 // Your code here -- RPC handlers for the worker to call.
 
-//
 // an example RPC handler.
 //
 // the RPC argument and reply types are defined in rpc.go.
-//
 func (c *Coordinator) Example(args *ExampleArgs, reply *ExampleReply) error {
 	reply.Y = args.X + 1
 	return nil
 }
 
-
-//
 // start a thread that listens for RPCs from worker.go
-//
 func (c *Coordinator) server() {
 	rpc.Register(c)
 	rpc.HandleHTTP()
@@ -41,30 +60,47 @@ func (c *Coordinator) server() {
 	go http.Serve(l, nil)
 }
 
-//
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
-//
 func (c *Coordinator) Done() bool {
 	ret := false
 
 	// Your code here.
 
-
 	return ret
 }
 
-//
 // create a Coordinator.
 // main/mrcoordinator.go calls this function.
 // nReduce is the number of reduce tasks to use.
-//
 func MakeCoordinator(files []string, nReduce int) *Coordinator {
-	c := Coordinator{}
+	c := Coordinator{
+		NReduce:            nReduce,
+		NMap:               len(files),
+		MapTasks:           make([]TaskInfo, 0),
+		ReduceTasks:        make([]TaskInfo, nReduce),
+		AllMapCompleted:    false,
+		AllReduceCompleted: false,
+		Mutex:              sync.Mutex{},
+	}
 
 	// Your code here.
-
-
+	c.InitTask(files)
 	c.server()
 	return &c
+}
+
+func (c *Coordinator) InitTask(file []string) {
+	for idx := range file {
+		c.MapTasks[idx] = TaskInfo{
+			FileName:   file[idx],
+			TaskStatus: Unassigned,
+			TimeStamp:  time.Now(),
+		}
+	}
+	for idx := range c.ReduceTasks {
+		c.ReduceTasks[idx] = TaskInfo{
+			TaskStatus: Unassigned,
+		}
+	}
 }
