@@ -104,3 +104,81 @@ func (c *Coordinator) InitTask(file []string) {
 		}
 	}
 }
+
+func (c *Coordinator) RequsetTask(args *MessageSend, reply *MessageReply) error {
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
+	if !c.AllMapCompleted {
+		NMapCompleted := 0
+		for idx := range c.MapTasks {
+			if c.MapTasks[idx].TaskStatus == Unassigned ||
+				c.MapTasks[idx].TaskStatus == Fialed ||
+				(c.MapTasks[idx].TaskStatus == Assigned && time.Since(c.MapTasks[idx].TimeStamp) > 10*time.Second) {
+				reply.FilaName = c.MapTasks[idx].FileName
+				reply.TaskID = idx
+				reply.TaskType = MapTask
+				reply.NMap = c.NMap
+				reply.NReduce = c.NReduce
+				c.MapTasks[idx].TaskStatus = Assigned
+				c.MapTasks[idx].TimeStamp = time.Now()
+				return nil
+			} else if c.MapTasks[idx].TaskStatus == Completed {
+				NMapCompleted++
+			}
+			if NMapCompleted == len(c.MapTasks) {
+				c.AllMapCompleted = true
+			} else {
+				reply.TaskType = Wait
+				return nil
+			}
+		}
+	}
+	if !c.AllReduceCompleted {
+		NReduceCompleted := 0
+		for idx := range c.ReduceTasks {
+			if c.ReduceTasks[idx].TaskStatus == Unassigned ||
+				c.ReduceTasks[idx].TaskStatus == Fialed ||
+				(c.ReduceTasks[idx].TaskStatus == Assigned && time.Since(c.ReduceTasks[idx].TimeStamp) > 10*time.Second) {
+				reply.TaskID = idx
+				reply.TaskType = ReduceTask
+				reply.FilaName = c.ReduceTasks[idx].FileName
+				reply.NMap = c.NMap
+				reply.NReduce = c.NReduce
+				c.ReduceTasks[idx].TaskStatus = Assigned
+				c.ReduceTasks[idx].TimeStamp = time.Now()
+				return nil
+			} else if c.ReduceTasks[idx].TaskStatus == Completed {
+				NReduceCompleted++
+			}
+			if NReduceCompleted == len(c.ReduceTasks) {
+				c.AllReduceCompleted = true
+			} else {
+				reply.TaskType = Wait
+				return nil
+			}
+		}
+	}
+	reply.TaskType = Exit
+
+	return nil
+}
+
+func (c *Coordinator) ReportTask(args *MessageSend, reply *MessageReply) error {
+	c.Mutex.Lock()
+	defer c.Mutex.Unlock()
+	if args.CompleteStatus == MapTaksComplete {
+		c.MapTasks[args.TaskID].TaskStatus = Completed
+		return nil
+	} else if args.CompleteStatus == MapTaskFailed {
+		c.MapTasks[args.TaskID].TaskStatus = Fialed
+		return nil
+	} else if args.CompleteStatus == ReduceTaskComplete {
+		c.ReduceTasks[args.TaskID].TaskStatus = Completed
+		return nil
+	} else if args.CompleteStatus == ReduceTaskFailed {
+		c.ReduceTasks[args.TaskID].TaskStatus = Fialed
+		return nil
+	}
+
+	return nil
+}
