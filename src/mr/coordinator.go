@@ -168,16 +168,12 @@ func (c *Coordinator) ReportTask(args *MessageSend, reply *MessageReply) error {
 	defer c.Mutex.Unlock()
 	if args.CompleteStatus == MapTaksComplete {
 		c.MapTasks[args.TaskID].TaskStatus = Completed
-		return nil
 	} else if args.CompleteStatus == MapTaskFailed {
 		c.MapTasks[args.TaskID].TaskStatus = Fialed
-		return nil
 	} else if args.CompleteStatus == ReduceTaskComplete {
 		c.ReduceTasks[args.TaskID].TaskStatus = Completed
-		return nil
 	} else if args.CompleteStatus == ReduceTaskFailed {
 		c.ReduceTasks[args.TaskID].TaskStatus = Fialed
-		return nil
 	}
 
 	return nil
