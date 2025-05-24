@@ -63,11 +63,11 @@ func (c *Coordinator) server() {
 // main/mrcoordinator.go calls Done() periodically to find out
 // if the entire job has finished.
 func (c *Coordinator) Done() bool {
-	ret := false
+	// ret := false
 
 	// Your code here.
 
-	return ret
+	return c.AllReduceCompleted
 }
 
 // create a Coordinator.
@@ -77,7 +77,7 @@ func MakeCoordinator(files []string, nReduce int) *Coordinator {
 	c := Coordinator{
 		NReduce:            nReduce,
 		NMap:               len(files),
-		MapTasks:           make([]TaskInfo, 0),
+		MapTasks:           make([]TaskInfo, len(files)),
 		ReduceTasks:        make([]TaskInfo, nReduce),
 		AllMapCompleted:    false,
 		AllReduceCompleted: false,
@@ -105,7 +105,7 @@ func (c *Coordinator) InitTask(file []string) {
 	}
 }
 
-func (c *Coordinator) RequsetTask(args *MessageSend, reply *MessageReply) error {
+func (c *Coordinator) RequestTask(args *MessageSend, reply *MessageReply) error {
 	c.Mutex.Lock()
 	defer c.Mutex.Unlock()
 	if !c.AllMapCompleted {
@@ -114,7 +114,7 @@ func (c *Coordinator) RequsetTask(args *MessageSend, reply *MessageReply) error 
 			if c.MapTasks[idx].TaskStatus == Unassigned ||
 				c.MapTasks[idx].TaskStatus == Fialed ||
 				(c.MapTasks[idx].TaskStatus == Assigned && time.Since(c.MapTasks[idx].TimeStamp) > 10*time.Second) {
-				reply.FilaName = c.MapTasks[idx].FileName
+				reply.FileName = c.MapTasks[idx].FileName
 				reply.TaskID = idx
 				reply.TaskType = MapTask
 				reply.NMap = c.NMap
@@ -125,12 +125,12 @@ func (c *Coordinator) RequsetTask(args *MessageSend, reply *MessageReply) error 
 			} else if c.MapTasks[idx].TaskStatus == Completed {
 				NMapCompleted++
 			}
-			if NMapCompleted == len(c.MapTasks) {
-				c.AllMapCompleted = true
-			} else {
-				reply.TaskType = Wait
-				return nil
-			}
+		}
+		if NMapCompleted == len(c.MapTasks) {
+			c.AllMapCompleted = true
+		} else {
+			reply.TaskType = Wait
+			return nil
 		}
 	}
 	if !c.AllReduceCompleted {
@@ -141,7 +141,7 @@ func (c *Coordinator) RequsetTask(args *MessageSend, reply *MessageReply) error 
 				(c.ReduceTasks[idx].TaskStatus == Assigned && time.Since(c.ReduceTasks[idx].TimeStamp) > 10*time.Second) {
 				reply.TaskID = idx
 				reply.TaskType = ReduceTask
-				reply.FilaName = c.ReduceTasks[idx].FileName
+				reply.FileName = c.ReduceTasks[idx].FileName
 				reply.NMap = c.NMap
 				reply.NReduce = c.NReduce
 				c.ReduceTasks[idx].TaskStatus = Assigned
@@ -150,12 +150,12 @@ func (c *Coordinator) RequsetTask(args *MessageSend, reply *MessageReply) error 
 			} else if c.ReduceTasks[idx].TaskStatus == Completed {
 				NReduceCompleted++
 			}
-			if NReduceCompleted == len(c.ReduceTasks) {
-				c.AllReduceCompleted = true
-			} else {
-				reply.TaskType = Wait
-				return nil
-			}
+		}
+		if NReduceCompleted == len(c.ReduceTasks) {
+			c.AllReduceCompleted = true
+		} else {
+			reply.TaskType = Wait
+			return nil
 		}
 	}
 	reply.TaskType = Exit

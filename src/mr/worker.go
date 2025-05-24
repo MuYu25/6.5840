@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"time"
 )
 
@@ -101,19 +102,21 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 }
 
 func HandleMapTask(reply *MessageReply, mapf func(string, string) []KeyValue) {
-	file, err := os.Open(reply.FilaName)
+
+	file, err := os.Open(reply.FileName)
 	if err != nil {
-		log.Fatalf("cannot open %v", reply.FilaName)
+		log.Fatalf("cannot open %v", reply.FileName)
 		return
 	}
 	content, err := io.ReadAll(file)
 	if err != nil {
-		log.Fatalf("cannot read %v", reply.FilaName)
+		log.Fatalf("cannot read %v", reply.FileName)
 		return
 	}
 	file.Close()
-	kva := mapf(reply.FilaName, string(content))
+	kva := mapf(reply.FileName, string(content))
 
+	// 按照key进行分组，相同的key会存放在相同的intermaeidate file中
 	intermediate := make([][]KeyValue, reply.NReduce)
 	for _, kv := range kva {
 		r := ihash(kv.Key) % reply.NReduce
@@ -121,18 +124,30 @@ func HandleMapTask(reply *MessageReply, mapf func(string, string) []KeyValue) {
 	}
 
 	for r, kva := range intermediate {
+		// 文件中使用taskid,避免多个worker对同一个文件，每个文件还是独立进行读写。
 		oname := fmt.Sprintf("mr-%d-%d", reply.TaskID, r)
-		ofile, err := os.CreateTemp("", oname)
+		ofile, err := os.Create(oname)
 		if err != nil {
-			log.Fatalf("cannot create %v", oname)
+			log.Fatalf("cannot create Temp %v: %v", oname, err)
 		}
 
 		enc := json.NewEncoder(ofile)
 		for _, kv := range kva {
-			enc.Encode(&kv)
+			if err := enc.Encode(kv); err != nil {
+				log.Fatalf("failed to encode kv pair: %v", err)
+			}
 		}
 		ofile.Close()
-		os.Rename(ofile.Name(), oname)
+
+		err = os.Rename(ofile.Name(), oname)
+		if err != nil {
+			log.Fatalf("failed to rename file %s to %s: %v", ofile.Name(), oname, err)
+		}
+
+		if _, err := os.Stat(oname); err != nil {
+			log.Fatalf("donot exist file: %v: %v", oname, err)
+		}
+
 	}
 
 	args := MessageSend{
@@ -160,6 +175,42 @@ func HandleReduceTask(reply *MessageReply, reducef func(string, []string) string
 		if err != nil {
 			log.Fatalf("cannot open %v", filename)
 		}
-
+		dec := json.NewDecoder(file)
+		for {
+			kv := KeyValue{}
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+		file.Close()
 	}
+	sort.Slice(intermediate, func(i, j int) bool {
+		return intermediate[i].Key < intermediate[j].Key
+	})
+
+	oname := fmt.Sprintf("mr-out-%v", reply.TaskID)
+	ofile, err := os.Create(oname)
+	if err != nil {
+		log.Fatalf("cannot create %v", oname)
+	}
+	for i := 0; i < len(intermediate); {
+		j := i
+		values := make([]string, 0)
+		for j < len(intermediate) && intermediate[i].Key == intermediate[j].Key {
+			values = append(values, intermediate[j].Value)
+			j++
+		}
+		output := reducef(intermediate[i].Key, values)
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+		i = j
+	}
+	ofile.Close()
+	os.Rename(ofile.Name(), oname)
+	args := MessageSend{
+		TaskID:         reply.TaskID,
+		CompleteStatus: ReduceTaskComplete,
+	}
+	call("Coordinator.ReportTask", args, &MessageReply{})
+
 }

@@ -52,7 +52,7 @@ type MessageSend struct {
 type MessageReply struct {
 	TaskID   int
 	TaskType TaskType
-	FilaName string
+	FileName string
 	NMap     int
 	NReduce  int
 }
