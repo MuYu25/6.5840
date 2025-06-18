@@ -19,7 +19,9 @@ package raft
 
 import (
 	//	"bytes"
+
 	"math/rand"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -27,7 +29,6 @@ import (
 	//	"6.5840/labgob"
 	"6.5840/labrpc"
 )
-
 
 // as each Raft peer becomes aware that successive log entries are
 // committed, the peer should send an ApplyMsg to the service (or
@@ -42,6 +43,7 @@ type ApplyMsg struct {
 	CommandValid bool
 	Command      interface{}
 	CommandIndex int
+	CommandTerm  int
 
 	// For 3D:
 	SnapshotValid bool
@@ -52,12 +54,28 @@ type ApplyMsg struct {
 
 // A Go object implementing a single Raft peer.
 type Raft struct {
-	mu        sync.Mutex          // Lock to protect shared access to this peer's state
+	mu        sync.RWMutex        // Lock to protect shared access to this peer's state
 	peers     []*labrpc.ClientEnd // RPC end points of all peers
 	persister *Persister          // Object to hold this peer's persisted state
 	me        int                 // this peer's index into peers[]
 	dead      int32               // set by Kill()
 
+	currentTerm int
+	votedFor    int
+	logs        []LogEntry
+
+	commitIndex int
+	lastApplied int
+
+	nextIndex  []int
+	matchIndex []int
+
+	state          NodeState
+	electionTimer  *time.Timer
+	heartbeatTimer *time.Timer
+	applyCh        chan ApplyMsg
+	applyCond      *sync.Cond
+	replicatorCond []*sync.Cond
 	// Your data here (3A, 3B, 3C).
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
@@ -92,7 +110,6 @@ func (rf *Raft) persist() {
 	// rf.persister.Save(raftstate, nil)
 }
 
-
 // restore previously persisted state.
 func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
@@ -113,7 +130,6 @@ func (rf *Raft) readPersist(data []byte) {
 	// }
 }
 
-
 // the service says it has created a snapshot that has
 // all info up to and including index. this means the
 // service no longer needs the log through (and including)
@@ -122,57 +138,6 @@ func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
 
 }
-
-
-// example RequestVote RPC arguments structure.
-// field names must start with capital letters!
-type RequestVoteArgs struct {
-	// Your data here (3A, 3B).
-}
-
-// example RequestVote RPC reply structure.
-// field names must start with capital letters!
-type RequestVoteReply struct {
-	// Your data here (3A).
-}
-
-// example RequestVote RPC handler.
-func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
-	// Your code here (3A, 3B).
-}
-
-// example code to send a RequestVote RPC to a server.
-// server is the index of the target server in rf.peers[].
-// expects RPC arguments in args.
-// fills in *reply with RPC reply, so caller should
-// pass &reply.
-// the types of the args and reply passed to Call() must be
-// the same as the types of the arguments declared in the
-// handler function (including whether they are pointers).
-//
-// The labrpc package simulates a lossy network, in which servers
-// may be unreachable, and in which requests and replies may be lost.
-// Call() sends a request and waits for a reply. If a reply arrives
-// within a timeout interval, Call() returns true; otherwise
-// Call() returns false. Thus Call() may not return for a while.
-// A false return can be caused by a dead server, a live server that
-// can't be reached, a lost request, or a lost reply.
-//
-// Call() is guaranteed to return (perhaps after a delay) *except* if the
-// handler function on the server side does not return.  Thus there
-// is no need to implement your own timeouts around Call().
-//
-// look at the comments in ../labrpc/labrpc.go for more details.
-//
-// if you're having trouble getting RPC to work, check that you've
-// capitalized all field names in structs passed over RPC, and
-// that the caller passes the address of the reply struct with &, not
-// the struct itself.
-func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
-}
-
 
 // the service using Raft (e.g. a k/v server) wants to start
 // agreement on the next command to be appended to Raft's log. if this
@@ -192,7 +157,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 	isLeader := true
 
 	// Your code here (3B).
-
 
 	return index, term, isLeader
 }
@@ -222,7 +186,6 @@ func (rf *Raft) ticker() {
 		// Your code here (3A)
 		// Check if a leader election should be started.
 
-
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
 		ms := 50 + (rand.Int63() % 300)
@@ -241,19 +204,180 @@ func (rf *Raft) ticker() {
 // for any long-running work.
 func Make(peers []*labrpc.ClientEnd, me int,
 	persister *Persister, applyCh chan ApplyMsg) *Raft {
-	rf := &Raft{}
-	rf.peers = peers
-	rf.persister = persister
-	rf.me = me
-
+	rf := &Raft{
+		mu:             sync.RWMutex{},
+		peers:          peers,
+		persister:      persister,
+		me:             me,
+		dead:           0,
+		currentTerm:    0,
+		votedFor:       -1,
+		logs:           make([]LogEntry, 1),
+		commitIndex:    0,
+		lastApplied:    0,
+		nextIndex:      make([]int, len(peers)),
+		matchIndex:     make([]int, len(peers)),
+		state:          Follower,
+		electionTimer:  time.NewTimer(RandomElectionTimeout()),
+		heartbeatTimer: time.NewTimer(StableHeartbeatTimeout()),
+		applyCh:        applyCh,
+		replicatorCond: make([]*sync.Cond, len(peers)),
+	}
 	// Your initialization code here (3A, 3B, 3C).
 
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
 
+	rf.applyCond = sync.NewCond(&rf.mu)
+	for peer := range peers {
+		rf.matchIndex[peer], rf.nextIndex[peer] = 0, rf.getLastLog().Index+1
+		if peer != rf.me {
+			rf.replicatorCond[peer] = sync.NewCond(&sync.Mutex{})
+
+			go rf.replicator(peer)
+		}
+	}
 	// start ticker goroutine to start elections
 	go rf.ticker()
 
+	go rf.applier()
 
 	return rf
+}
+
+func (rf *Raft) applier() {
+	for rf.killed() == false {
+		rf.mu.Lock()
+		for rf.commitIndex <= rf.lastApplied {
+			rf.applyCond.Wait()
+		}
+
+		firstLogIndex, commitIndex, lastApplied := rf.getFirstLog().Index, rf.commitIndex, rf.lastApplied
+		entries := make([]LogEntry, commitIndex-lastApplied)
+		copy(entries, rf.logs[lastApplied-firstLogIndex+1:commitIndex-firstLogIndex+1])
+		rf.mu.Unlock()
+
+		for _, entry := range entries {
+			rf.applyCh <- ApplyMsg{
+				CommandValid: true,
+				Command:      entry.Command,
+				CommandIndex: entry.Index,
+				CommandTerm:  entry.Term,
+			}
+		}
+		rf.mu.Lock()
+		DPrintf("{Node %v} applies log entries from index %v to %v in term %v", rf.me, lastApplied+1, commitIndex, rf.currentTerm)
+
+		rf.lastApplied = Max(rf.lastApplied, commitIndex)
+		rf.mu.Unlock()
+	}
+}
+
+func (rf *Raft) needReplicating(peer int) bool {
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
+	return rf.state == Leader && rf.matchIndex[peer] < rf.getLastLog().Index
+}
+
+func (rf *Raft) replicator(peer int) {
+	rf.replicatorCond[peer].L.Lock()
+	defer rf.replicatorCond[peer].L.Unlock()
+	for rf.killed() == false {
+		for !rf.needReplicating(peer) {
+			rf.replicatorCond[peer].Wait()
+		}
+		rf.replicatOnceRound(peer)
+	}
+}
+
+func (rf *Raft) isLogUpToDate(index, term int) bool {
+	lastLog := rf.getLastLog()
+	return term > lastLog.Term || (term == lastLog.Term && index >= lastLog.Index)
+}
+
+func (rf *Raft) isLogMatched(index, term int) bool {
+	return index <= rf.getLastLog().Index && term == rf.logs[index-rf.getFirstLog().Index].Term
+}
+
+func (rf *Raft) advanceCommitIndexForLeader() {
+	n := len(rf.matchIndex)
+	sortMatchIndex := make([]int, n)
+	copy(sortMatchIndex, rf.matchIndex)
+	sort.Ints(sortMatchIndex)
+	newCommitIndex := sortMatchIndex[n-(n/2+1)]
+	if newCommitIndex > rf.commitIndex {
+		if rf.isLogMatched(newCommitIndex, rf.currentTerm) {
+			DPrintf("{Node %v} advances commitIndex from %v to %v in term %v", rf.me, rf.commitIndex, newCommitIndex, rf.currentTerm)
+			rf.commitIndex = newCommitIndex
+			rf.applyCond.Signal()
+		}
+	}
+}
+
+func (rf *Raft) replicatOnceRound(peer int) {
+	rf.mu.RLock()
+	if rf.state != Leader {
+		rf.mu.RUnlock()
+		return
+	}
+	prevLogIndex := rf.nextIndex[peer] - 1
+	if prevLogIndex < rf.getFirstLog().Index {
+		args := rf.genInstallSnapshotArgs()
+		rf.mu.RUnlock()
+		reply := new(InstallSnapshotReply)
+		if rf.sendInstallSnapshot(peer, args, reply) {
+			rf.mu.Lock()
+			if rf.state == Leader && rf.currentTerm == args.Term {
+				if reply.Term > rf.currentTerm {
+					rf.ChangeState(Follower)
+					rf.currentTerm, rf.votedFor = reply.Term, -1
+					rf.persist()
+				} else {
+					rf.nextIndex[peer] = args.LastIncludedIndex + 1
+					rf.matchIndex[peer] = args.LastIncludedIndex
+				}
+			}
+			rf.mu.Unlock()
+			DPrintf("{Node %v} sent InstallSnapshotArgs %v to {Node %v} and receives InstallSnapshotReply %v", rf.me, args, peer, reply)
+		}
+	} else {
+		args := rf.genAppendEntriesArgs(prevLogIndex)
+		rf.mu.RUnlock()
+		reply := new(appendedEntriesReply)
+		if rf.sendAppendEntries(peer, args, reply) {
+			rf.mu.Lock()
+			if args.Term == rf.currentTerm && rf.state == Leader {
+				if !reply.Success {
+					if reply.Term > rf.currentTerm {
+						rf.ChangeState(Follower)
+						rf.currentTerm, rf.votedFor = reply.Term, -1
+						rf.persist()
+					} else if reply.Term == rf.currentTerm {
+						rf.nextIndex[peer] = reply.ConflictIndex
+						if reply.ConflictIndex != -1 {
+							firstLogIndex := rf.getFirstLog().Index
+							lo, hi := firstLogIndex, args.prevLogIndex-1
+							for lo < hi {
+								mid := (lo + hi + 1) / 2
+								if rf.logs[mid-firstLogIndex].Term <= reply.ConflictTerm {
+									lo = mid
+								} else {
+									hi = mid - 1
+								}
+							}
+							if rf.logs[lo-firstLogIndex].Term == reply.ConflictTerm {
+								rf.nextIndex[peer] = lo
+							}
+						}
+					}
+				} else {
+					rf.matchIndex[peer] = args.prevLogIndex + len(args.Entries)
+					rf.nextIndex[peer] = rf.matchIndex[peer] + 1
+					rf.advanceCommitIndexForLeader()
+				}
+			}
+			rf.mu.Unlock()
+			DPrintf("{Node %v} sent AppendEntriesArgs %v to {Node %v} and receives AppendEntriesReply %v", rf.me, args, peer, reply)
+		}
+	}
 }
