@@ -21,7 +21,6 @@ import (
 	//	"bytes"
 
 	"bytes"
-	"math/rand"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -104,11 +103,10 @@ func (rf *Raft) ChangeState(state NodeState) {
 // return currentTerm and whether this server
 // believes it is the leader.
 func (rf *Raft) GetState() (int, bool) {
-
-	var term int
-	var isleader bool
+	rf.mu.RLock()
+	defer rf.mu.RUnlock()
 	// Your code here (3A).
-	return term, isleader
+	return rf.currentTerm, rf.state == Leader
 }
 
 func (rf *Raft) GetRaftStateSize() int {
@@ -182,7 +180,39 @@ func (rf *Raft) readPersist(data []byte) {
 // that index. Raft should now trim its log as much as possible.
 func (rf *Raft) Snapshot(index int, snapshot []byte) {
 	// Your code here (3D).
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	snapshotIndex := rf.getFirstLog().Index
+	if index <= snapshotIndex || index > rf.getLastLog().Index {
+		DPrintf("{Node %v} rejects replacing log with snapshotIndex %v as current snapshotIndex %v is larger in term %v", rf.me, index, snapshotIndex, rf.currentTerm)
+		return
+	}
+	// remove log enteries up to index
+	rf.logs = shrinkEntries(rf.logs[index-snapshotIndex:])
+	rf.logs[0].Command = nil
+	rf.persister.Save(rf.encodeState(), snapshot)
+	DPrintf("{Node %v}'s state is {state %v, term %v, commitIndex %v, lastApplied %v,firstLog %v, lastLog %v} after accecpting the snapshot with index %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), index)
+}
 
+func (rf *Raft) CondInstallSnapshot(lastIncludedTerm int, lastIncludedIndex int, snapshot []byte) bool {
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+	if lastIncludedIndex <= rf.commitIndex {
+		DPrintf("{Node %v} rejects outdated snapshot with lastIncludedIndex %v as current commitIndex is %v in term %v", rf.me, lastIncludedIndex, rf.commitIndex, rf.currentTerm)
+		return false
+	}
+	if lastIncludedIndex > rf.getLastLog().Index {
+		rf.logs = make([]LogEntry, 1)
+	} else {
+		rf.logs = shrinkEntries(rf.logs[lastIncludedIndex-rf.getFirstLog().Index:])
+		rf.logs[0].Command = nil
+	}
+	rf.logs[0].Term, rf.logs[0].Index = lastIncludedTerm, lastIncludedIndex
+	rf.commitIndex, rf.lastApplied = lastIncludedIndex, lastIncludedIndex
+	rf.persister.Save(rf.encodeState(), snapshot)
+
+	DPrintf("{Node %v}'s state is {state %v, term %v, commitIndex %v, lastApplied %v, firstLog %v, lastLog %v} after accepting the snapshot with lastIncludedTerm %v and lastIncludedIndex %v", rf.me, rf.state, rf.currentTerm, rf.commitIndex, rf.lastApplied, rf.getFirstLog(), rf.getLastLog(), lastIncludedTerm, lastIncludedIndex)
+	return true
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -297,6 +327,7 @@ func (rf *Raft) ticker() {
 			rf.mu.Lock()
 			rf.ChangeState(Candidate)
 			rf.currentTerm += 1
+			rf.persist()
 			// start election
 			rf.StartElection()
 			rf.electionTimer.Reset(RandomElectionTimeout())
@@ -314,8 +345,8 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 50 + (rand.Int63() % 300)
-		time.Sleep(time.Duration(ms) * time.Millisecond)
+		// ms := 50 + (rand.Int63() % 300)
+		// time.Sleep(time.Duration(ms) * time.Millisecond)
 	}
 }
 
@@ -374,6 +405,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 func (rf *Raft) applier() {
 	for rf.killed() == false {
 		rf.mu.Lock()
+		// check the commitIndex is advanced
 		for rf.commitIndex <= rf.lastApplied {
 			rf.applyCond.Wait()
 		}
